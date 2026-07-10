@@ -1,0 +1,12 @@
+profiles:
+  uno:
+    fqbn: arduino:avr:uno
+    platforms:
+      - platform: arduino:avr (1.8.8)
+    libraries:
+      - OneWire (2.3.8)
+      - DallasTemperature (4.0.6)
+
+default_profile: uno
+default_port: /dev/ttyACM0
+default_protocol: serial
