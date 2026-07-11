@@ -47,7 +47,6 @@ DallasTemperature sensors(&oneWire);
 bool heating = false;                 // current heater state, held across loops
 bool conversionPending = false;       // waiting on an async DS18B20 conversion
 unsigned long lastRequestMs = 0;      // when the current sample was requested
-bool haveReading = false;             // seen at least one valid reading yet?
 
 // LCD repaint tracking (repaint only on change, to avoid flicker).
 int  shownTempDeci = INT16_MIN;       // last shown temp * 10, or sentinel
@@ -91,26 +90,22 @@ void updateDisplay(float tempC) {
     lcd.setCursor(0, 1);
     lcd.print("Heat:");
     lcd.print(heating ? "ON " : "OFF");
-    lcd.print(" Set:");
+    lcd.print(" S:");             // abbreviated so the row fits the 16 columns
     lcd.print(SETPOINT_C, 1);     // fixed for now; ticket 3 makes it live
+    lcd.print(" ");               // pad to 16 to wipe any stale trailing char
   }
 }
 
 // Fold a fresh reading into the control decision and outputs.
 void handleReading(float tempC) {
   if (tempC == DEVICE_DISCONNECTED_C) {
-    // Basic safety: never heat on a bad reading. The full safety gate + Alarm
-    // (35 C cutoff, sensor-fault UI) is ticket #2.
+    // Bare safe glue: never heat on a bad reading. The fault Alarm / UI and the
+    // 35 C Safety Cutoff (ADR-0001) are ticket #2's job, not this one.
     heating = false;
     relayApply(false);
-    Serial.println("Error: DS18B20 not found");
-    lcd.setCursor(0, 0);
-    lcd.print("Sensor error    ");
-    shownTempDeci = INT16_MIN;    // force a repaint once a reading returns
     return;
   }
 
-  haveReading = true;
   heating = decideHeat(tempC, SETPOINT_C, TOLERANCE_C, heating);
   relayApply(heating);
 
