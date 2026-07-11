@@ -44,7 +44,7 @@ and the images as the reference.
 
 | Component | Product | Buy link | Image |
 | --- | --- | --- | --- |
-| Microcontroller | Arduino Uno (`arduino:avr:uno`) | — | — |
+| Microcontroller | Arduino Uno Rev3 (`arduino:avr:uno`) | [Arduino Store](https://store-usa.arduino.cc/collections/boards-modules/products/arduino-uno-rev3) | <img src="docs/images/arduino-uno-rev3.jpg" width="120" alt="Arduino Uno Rev3"> |
 | Display + buttons | DFRobot 1602 LCD Keypad Shield (DFR0009) — 16×2 display + 5 analog buttons | [DigiKey](https://www.digikey.co.nz/en/products/detail/dfrobot/DFR0009/7597118?s=N4IgTCBcDaICIDEBKAGNBOEBdAvkA) | <img src="docs/images/lcd-keypad-shield-dfr0009.jpg" width="120" alt="DFRobot LCD Keypad Shield DFR0009"> |
 | Temperature probe | DS18B20 waterproof probe (with a 4.7 kΩ pull-up) | [RS](https://nz.rs-online.com/web/p/sensor-development-tools/2049893) | <img src="docs/images/ds18b20-probe.jpg" width="120" alt="DS18B20 temperature probe"> |
 | Heat switch | Solid-state relay G3MB-202P (drives the bulb) | [AliExpress](https://www.aliexpress.com/item/1005004651776233.html) | <img src="docs/images/ssr-g3mb-202p.avif" width="120" alt="G3MB-202P solid-state relay module"> |
