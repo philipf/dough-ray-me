@@ -27,6 +27,24 @@
 //     model the .ino can draw without any arithmetic of its own: a Setpoint-
 //     centered bar level and a Heater-Duty digit, newest column on the right.
 
+// The three state-threading functions below carry a HistoryState by value (228
+// bytes at 16 columns). In the Arduino sketch the whole program collapses into a
+// single inlined main(), and gcc gives each inlined by-value temporary its own
+// stack slot rather than reusing one -- so left to inline, the accrue/observe/
+// render copies *sum* into main()'s frame (~1.2 KB) and, on top of the ~0.9 KB of
+// globals, overflow the ATmega328P's 2 KB SRAM: the stack lands on top of the
+// globals at boot and the board resets before it prints its first serial line.
+// Marking these noinline keeps each big copy in a short-lived frame that is freed
+// on return, so the peak stack stays bounded. HISTORY_NOINLINE is a no-op on the
+// host, where the tests compile this header natively. See docs/adr for the SRAM
+// budget note; do not "simplify" these back to plain inline without re-checking
+// the sketch's main() frame size (avr-objdump -d, main's subi r28/sbci r29).
+#if defined(__AVR__)
+#define HISTORY_NOINLINE __attribute__((noinline))
+#else
+#define HISTORY_NOINLINE
+#endif
+
 static const int           HISTORY_COLUMNS   = 16;         // 16 windows on screen
 static const unsigned long HISTORY_WINDOW_MS = 300000UL;   // 5 minutes per window
 static const float         HISTORY_BAR_STEP  = 0.5f;       // deg C per bar level
@@ -101,7 +119,7 @@ inline HistoryState historyRollover(HistoryState s) {
 
 // Fold a valid Box Air Temperature reading into the current window's running
 // mean. Invalid / faulted readings are simply not passed here (as in stats.h).
-inline HistoryState historyObserveTemp(HistoryState s, float tempC) {
+HISTORY_NOINLINE inline HistoryState historyObserveTemp(HistoryState s, float tempC) {
   s.cols[s.head].tempSum += tempC;
   s.cols[s.head].tempCount += 1;
   return s;
@@ -112,7 +130,7 @@ inline HistoryState historyObserveTemp(HistoryState s, float tempC) {
 // that would cross a boundary is split so elapsed time accumulates across the
 // rollover rather than being lost or double-counted; the loop is robust to a
 // single interval spanning several windows.
-inline HistoryState historyAccrue(HistoryState s, bool heatOn, unsigned long deltaMs) {
+HISTORY_NOINLINE inline HistoryState historyAccrue(HistoryState s, bool heatOn, unsigned long deltaMs) {
   while (deltaMs > 0) {
     // Invariant at the top of the loop: the current window is not yet full, so
     // there is at least 1 ms of room and the loop makes progress.
@@ -152,7 +170,7 @@ inline int historyDutyDigit(HistoryWindow w) {
 // Build the per-column render model against the current Setpoint. Started windows
 // fill from the right (newest at HISTORY_COLUMNS - 1); columns never started
 // render fully EMPTY so "no data yet" is never mistaken for a real cold reading.
-inline HistoryRender historyRender(HistoryState s, float setpointC) {
+HISTORY_NOINLINE inline HistoryRender historyRender(const HistoryState& s, float setpointC) {
   HistoryRender r;
   for (int d = 0; d < HISTORY_COLUMNS; ++d) {
     r.cols[d].barLevel  = HISTORY_EMPTY;
