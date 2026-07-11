@@ -1,14 +1,18 @@
-// dough-ray-me -- fermentation temperature controller (ticket 1: control spine).
+// dough-ray-me -- fermentation temperature controller (ticket 3: keypad UI).
 //
-// Holds the Fermenting Box at a fixed, compile-time Setpoint using a hysteresis
-// control law, on a non-blocking loop (ADR-0002): the DS18B20 is read
-// asynchronously and there is no delay() in loop(), so the keypad added in a
-// later ticket will never feel laggy. The decision logic lives in control.h as a
-// pure, host-tested unit; this file is the thin hardware shell around it.
+// Holds the Fermenting Box at a baker-chosen Setpoint using a hysteresis control
+// law, on a non-blocking loop (ADR-0002): the DS18B20 is read asynchronously and
+// there is no delay() in loop(), so the keypad never feels laggy. Two pure,
+// host-tested units carry the logic -- decideHeat() in control.h and the UI state
+// machine in ui.h; this file is the thin hardware shell around them.
 //
-// Later tickets add: the safety gate + Alarm (#2), keypad editing of Setpoint and
-// Tolerance (#3), EEPROM persistence (#4), the Stats screen (#5), and the boot
-// splash + full serial line (#6).
+// The LCD Keypad Shield adds live editing: Left/Right page four screens
+// (Home / Setpoint / Tolerance / Stats), Up/Down edit the current screen's value
+// (and the Setpoint straight from Home), and Select returns to Home. Edits are
+// live with no confirm -- the new Setpoint/Tolerance feed decideHeat() at once.
+//
+// Later tickets add: the safety gate + Alarm (#2), EEPROM persistence (#4), the
+// Stats screen numbers (#5), and the boot splash + full serial line (#6).
 //
 // Pin map (from the thermostat PoC, unchanged):
 //   D2        DS18B20 data (4.7k pull-up to 5V)
@@ -17,26 +21,37 @@
 //   D8, D9    LCD RS, E
 //   D10       LCD backlight (shield, default-on)
 //   D13       LED_BUILTIN -- mirrors the relay
-//   A0        keypad analog ladder (unused until ticket 3)
+//   A0        keypad analog ladder (5 buttons on one pin)
 
 #include <LiquidCrystal.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
 #include "control.h"
-
-// --- Fixed tuning (becomes keypad-editable in ticket 3) ---------------------
-const float SETPOINT_C  = 24.0;   // target Box Air Temperature
-const float TOLERANCE_C = 0.5;    // +/- half-band around the Setpoint
+#include "ui.h"
 
 // --- Pins -------------------------------------------------------------------
 const uint8_t RELAY_PIN     = 3;
 const bool    RELAY_ACTIVE_HIGH = true;
 const int     ONE_WIRE_BUS  = 2;
+const uint8_t KEYPAD_PIN    = A0;      // all 5 buttons on one analog resistor ladder
 
 // --- Timing -----------------------------------------------------------------
 const unsigned long SAMPLE_INTERVAL_MS = 1000;  // one reading per second
 const unsigned long CONVERSION_MS      = 750;   // DS18B20 12-bit conversion time
+const unsigned long BUTTON_SCAN_MS     = 5;     // poll the keypad every few ms
+const unsigned long REPEAT_DELAY_MS    = 500;   // hold this long before auto-repeat starts
+const unsigned long REPEAT_RATE_MS     = 150;   // then emit a repeat this often
+
+// --- Keypad analog ladder ---------------------------------------------------
+// DFRobot LCD Keypad Shield thresholds. Each button ties A0 to a different
+// voltage via a resistor divider; we bucket the raw 0-1023 reading. "None"
+// (all buttons up) floats near 1023.
+const int KEY_ADC_RIGHT  = 50;
+const int KEY_ADC_UP     = 195;
+const int KEY_ADC_DOWN   = 380;
+const int KEY_ADC_LEFT   = 555;
+const int KEY_ADC_SELECT = 790;
 
 // --- Hardware ---------------------------------------------------------------
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
@@ -47,14 +62,40 @@ DallasTemperature sensors(&oneWire);
 bool heating = false;                 // current heater state, held across loops
 bool conversionPending = false;       // waiting on an async DS18B20 conversion
 unsigned long lastRequestMs = 0;      // when the current sample was requested
+float lastTempC = DEVICE_DISCONNECTED_C;  // most recent reading, for repaints on UI change
+
+UiState ui = uiInitial();             // live screen + Setpoint + Tolerance (pure unit)
+
+// Keypad edge detection + auto-repeat (impure timing lives here, not in ui.h).
+UiButton      heldButton   = UI_BTN_NONE;  // button currently pressed, or NONE
+unsigned long lastScanMs   = 0;            // last time we sampled A0
+unsigned long nextRepeatMs = 0;            // when the held button next auto-repeats
 
 // LCD repaint tracking (repaint only on change, to avoid flicker).
-int  shownTempDeci = INT16_MIN;       // last shown temp * 10, or sentinel
-int  shownHeating  = -1;              // last shown heater state, or sentinel
+UiScreen shownScreen        = UI_SCREEN_COUNT;  // sentinel: force first paint
+int      shownTempDeci      = INT16_MIN;        // last shown temp * 10
+int      shownHeating       = -1;               // last shown heater state
+int      shownSetpointDeci  = INT16_MIN;        // last shown Setpoint * 10
+int      shownToleranceDeci = INT16_MIN;        // last shown Tolerance * 100
+
+// Round a temperature to fixed-point deci/centi for cheap change detection.
+int toDeci(float v)  { return (int)(v * 10.0  + (v >= 0 ? 0.5 : -0.5)); }
+int toCenti(float v) { return (int)(v * 100.0 + (v >= 0 ? 0.5 : -0.5)); }
 
 void relayApply(bool on) {
   digitalWrite(RELAY_PIN, on == RELAY_ACTIVE_HIGH ? HIGH : LOW);
   digitalWrite(LED_BUILTIN, on ? HIGH : LOW);
+}
+
+// Decode the raw A0 reading into a button, or NONE when all are up.
+UiButton readKeypad() {
+  int adc = analogRead(KEYPAD_PIN);
+  if (adc < KEY_ADC_RIGHT)  return UI_BTN_RIGHT;
+  if (adc < KEY_ADC_UP)     return UI_BTN_UP;
+  if (adc < KEY_ADC_DOWN)   return UI_BTN_DOWN;
+  if (adc < KEY_ADC_LEFT)   return UI_BTN_LEFT;
+  if (adc < KEY_ADC_SELECT) return UI_BTN_SELECT;
+  return UI_BTN_NONE;
 }
 
 void setup() {
@@ -68,55 +109,155 @@ void setup() {
   relayApply(false);                    // heater OFF until the first valid reading
 
   lcd.begin(16, 2);
-  lcd.print("dough-ray-me");
-  lcd.setCursor(0, 1);
-  lcd.print("Set:");
-  lcd.print(SETPOINT_C, 1);
-  lcd.print("C");
+  // First updateDisplay() paints the full Home screen (sentinels force it).
 }
 
-// Repaint only the parts of the LCD that changed.
-void updateDisplay(float tempC) {
-  int tempDeci = (int)(tempC * 10.0 + (tempC >= 0 ? 0.5 : -0.5));
-  if (tempDeci != shownTempDeci) {
-    shownTempDeci = tempDeci;
+// Force a full repaint of the value fields -- used when the active screen
+// changes, since a new screen shows different fields in the same cells.
+void invalidateDisplay() {
+  shownTempDeci      = INT16_MIN;
+  shownHeating       = -1;
+  shownSetpointDeci  = INT16_MIN;
+  shownToleranceDeci = INT16_MIN;
+}
+
+// Repaint only the parts of the LCD that changed, for the current screen.
+void updateDisplay() {
+  // Wipe and relabel both rows when the screen itself changed.
+  if (ui.screen != shownScreen) {
+    shownScreen = ui.screen;
+    invalidateDisplay();
+    lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Temp:");
-    lcd.print(tempC, 1);
-    lcd.print("C    ");           // trailing spaces wipe stale digits
+    switch (ui.screen) {
+      case UI_HOME:      lcd.print("dough-ray-me");  break;
+      case UI_SETPOINT:  lcd.print("Setpoint");      break;
+      case UI_TOLERANCE: lcd.print("Tolerance");     break;
+      case UI_STATS:     lcd.print("Stats");         break;
+      default: break;
+    }
   }
-  if ((int)heating != shownHeating) {
-    shownHeating = (int)heating;
-    lcd.setCursor(0, 1);
-    lcd.print("Heat:");
-    lcd.print(heating ? "ON " : "OFF");
-    lcd.print(" S:");             // abbreviated so the row fits the 16 columns
-    lcd.print(SETPOINT_C, 1);     // fixed for now; ticket 3 makes it live
-    lcd.print(" ");               // pad to 16 to wipe any stale trailing char
+
+  int tempDeci      = toDeci(lastTempC);
+  int setDeci       = toDeci(ui.setpointC);
+  int tolCenti      = toCenti(ui.toleranceC);
+  bool haveTemp     = (lastTempC != DEVICE_DISCONNECTED_C);
+
+  switch (ui.screen) {
+    case UI_HOME:
+      // Row 0: current Box Air Temperature.  Row 1: heat state + Setpoint.
+      if (tempDeci != shownTempDeci) {
+        shownTempDeci = tempDeci;
+        lcd.setCursor(0, 0);
+        lcd.print("Temp:");
+        if (haveTemp) { lcd.print(lastTempC, 1); lcd.print("C   "); }
+        else          { lcd.print("--.-C  "); }
+      }
+      if ((int)heating != shownHeating || setDeci != shownSetpointDeci) {
+        shownHeating      = (int)heating;
+        shownSetpointDeci = setDeci;
+        lcd.setCursor(0, 1);
+        lcd.print("Heat:");
+        lcd.print(heating ? "ON " : "OFF");
+        lcd.print(" S:");             // abbreviated so the row fits 16 columns
+        lcd.print(ui.setpointC, 1);
+        lcd.print(" ");               // pad to wipe any stale trailing char
+      }
+      break;
+
+    case UI_SETPOINT:
+      // Row 1: the live Setpoint the baker is editing.
+      if (setDeci != shownSetpointDeci) {
+        shownSetpointDeci = setDeci;
+        lcd.setCursor(0, 1);
+        lcd.print("Set: ");
+        lcd.print(ui.setpointC, 1);
+        lcd.print(" C   ");
+      }
+      break;
+
+    case UI_TOLERANCE:
+      // Row 1: the live Tolerance (+/- half-band) the baker is editing.
+      if (tolCenti != shownToleranceDeci) {
+        shownToleranceDeci = tolCenti;
+        lcd.setCursor(0, 1);
+        lcd.print("+/-");
+        lcd.print(ui.toleranceC, 2);
+        lcd.print(" C   ");
+      }
+      break;
+
+    case UI_STATS:
+      // Shell only: the min/max and Heater Duty numbers arrive in ticket 5.
+      if (shownTempDeci == INT16_MIN) {
+        shownTempDeci = 0;
+        lcd.setCursor(0, 1);
+        lcd.print("(ticket 5)      ");
+      }
+      break;
+
+    default: break;
   }
 }
 
 // Fold a fresh reading into the control decision and outputs.
 void handleReading(float tempC) {
+  lastTempC = tempC;
+
   if (tempC == DEVICE_DISCONNECTED_C) {
     // Bare safe glue: never heat on a bad reading. The fault Alarm / UI and the
     // 35 C Safety Cutoff (ADR-0001) are ticket #2's job, not this one.
     heating = false;
     relayApply(false);
+    updateDisplay();
     return;
   }
 
-  heating = decideHeat(tempC, SETPOINT_C, TOLERANCE_C, heating);
+  // Live Setpoint/Tolerance from the UI state machine drive the control law.
+  heating = decideHeat(tempC, ui.setpointC, ui.toleranceC, heating);
   relayApply(heating);
 
   Serial.print("T:");
   Serial.print(tempC, 1);
   Serial.print(" C  Set:");
-  Serial.print(SETPOINT_C, 1);
+  Serial.print(ui.setpointC, 1);
+  Serial.print("  Tol:");
+  Serial.print(ui.toleranceC, 2);
   Serial.print("  Heat:");
   Serial.println(heating ? "ON" : "OFF");
 
-  updateDisplay(tempC);
+  updateDisplay();
+}
+
+// Non-blocking keypad scan: edge-detect the analog ladder and auto-repeat on
+// hold. Emits at most one pure UiButton event per call; the pure state machine
+// (ui.h) does the rest. Auto-repeat timing is impure and stays here (ADR-0002:
+// no delay(), millis()-scheduled).
+void scanButtons(unsigned long now) {
+  if ((now - lastScanMs) < BUTTON_SCAN_MS) return;
+  lastScanMs = now;
+
+  UiButton btn = readKeypad();
+  UiButton event = UI_BTN_NONE;
+
+  if (btn != heldButton) {
+    // Edge: a new button went down (or all released). A press fires one step
+    // immediately, then arms the initial pre-repeat pause.
+    heldButton = btn;
+    if (btn != UI_BTN_NONE) {
+      event = btn;
+      nextRepeatMs = now + REPEAT_DELAY_MS;
+    }
+  } else if (btn != UI_BTN_NONE && (long)(now - nextRepeatMs) >= 0) {
+    // Still held past the pause: auto-repeat at the steady rate.
+    event = btn;
+    nextRepeatMs = now + REPEAT_RATE_MS;
+  }
+
+  if (event != UI_BTN_NONE) {
+    ui = uiStep(ui, event);   // live edit: new Setpoint/Tolerance used next reading
+    updateDisplay();          // reflect navigation / value change at once
+  }
 }
 
 void loop() {
@@ -135,5 +276,6 @@ void loop() {
     handleReading(sensors.getTempCByIndex(0));
   }
 
-  // Buttons will be scanned here without blocking (ticket #3).
+  // Scan the keypad every few ms so presses are never swallowed by the sensor.
+  scanButtons(now);
 }
