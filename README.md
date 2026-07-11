@@ -64,7 +64,7 @@ arduino-cli compile . \
 Run the host tests (pure logic — no board or Arduino toolchain needed):
 
 ```sh
-cd firmware/dough-ray-me/test
+cd firmware/test
 ./run.sh
 ```
 
@@ -81,9 +81,11 @@ recorded as ADRs under [docs/adr/](docs/adr/).
 
 ## Layout
 
-- `firmware/dough-ray-me/` — the product firmware. The control law, safety gate, UI
-  state machine, persistence and stats are pure C++ units (tested on the host under
-  `test/`); the `.ino` is a thin hardware shell around them.
+- `firmware/dough-ray-me/` — the product firmware (the Arduino sketch). The control
+  law, safety gate, UI state machine, persistence and stats are pure C++ units; the
+  `.ino` is a thin hardware shell around them.
+- `firmware/test/` — the host tests for those pure units, run with `g++` (no board
+  needed).
 - `poc/` — the earlier proof-of-concept sketches (blink, LCD, relay, DS18B20,
   thermostat) kept as history.
 

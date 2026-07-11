@@ -3,7 +3,7 @@
 // the Safety Cutoff / Alarm rules in CONTEXT.md / SPEC.md, not from re-deriving
 // the implementation.
 #include <cstdio>
-#include "../safety.h"
+#include "../dough-ray-me/safety.h"
 
 static int failures = 0;
 static int checks = 0;

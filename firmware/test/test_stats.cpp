@@ -5,7 +5,7 @@
 // rendering and the millis() timing that feeds elapsed intervals are impure glue
 // in the .ino; only the pure accumulation is exercised here.
 #include <cstdio>
-#include "../stats.h"
+#include "../dough-ray-me/stats.h"
 
 static int failures = 0;
 static int checks = 0;

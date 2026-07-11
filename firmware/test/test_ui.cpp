@@ -4,7 +4,7 @@
 // pure (state, buttonEvent) -> state transition is exercised here; the keypad
 // analog-ladder decode and auto-repeat timing are impure glue in the .ino.
 #include <cstdio>
-#include "../ui.h"
+#include "../dough-ray-me/ui.h"
 
 static int failures = 0;
 static int checks = 0;

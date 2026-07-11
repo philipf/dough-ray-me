@@ -2,7 +2,7 @@
 // compiled and run natively (see run.sh). Expected values come from the control
 // law in CONTEXT.md / SPEC.md, not from re-deriving the implementation.
 #include <cstdio>
-#include "../control.h"
+#include "../dough-ray-me/control.h"
 
 static int failures = 0;
 static int checks = 0;

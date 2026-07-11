@@ -6,7 +6,7 @@
 // debounce state machine and the validity check are exercised here.
 #include <cmath>
 #include <cstdio>
-#include "../persist.h"
+#include "../dough-ray-me/persist.h"
 
 static int failures = 0;
 static int checks = 0;
