@@ -1,5 +1,6 @@
-// dough-ray-me -- fermentation temperature controller (tickets 1-5: control
-// spine + safety gate + keypad UI + EEPROM persistence + Stats screen numbers).
+// dough-ray-me -- fermentation temperature controller (tickets 1-6: control
+// spine + safety gate + keypad UI + EEPROM persistence + Stats screen numbers +
+// boot splash and the full once-per-sample serial line).
 //
 // Holds the Fermenting Box at a baker-chosen Setpoint using a hysteresis control
 // law, on a non-blocking loop (ADR-0002): the DS18B20 is read asynchronously and
@@ -24,7 +25,11 @@
 // Air Temperature and Heater Duty since power-on, cleared by the shield's RESET
 // (stats.h).
 //
-// Later tickets add: the boot splash + full serial line (#6).
+// On power-on a brief "dough-ray-me" splash holds for ~1.5 s before the Home
+// screen, and once per sample the full state is logged over USB serial (Box Air
+// Temperature / Setpoint / Tolerance / heat state / Heater Duty / Alarm) for
+// multi-hour tuning on a laptop -- USB cable only, nothing else leaves the box
+// (ADR-0003).
 //
 // Pin map (from the thermostat PoC, unchanged):
 //   D2        DS18B20 data (4.7k pull-up to 5V)
@@ -68,6 +73,7 @@ const int EEPROM_ADDR_SETPOINT  = 1;   // float, 4 bytes
 const int EEPROM_ADDR_TOLERANCE = 5;   // float, 4 bytes
 
 // --- Timing -----------------------------------------------------------------
+const unsigned long BOOT_SPLASH_MS     = 1500;  // "dough-ray-me" splash on power-on
 const unsigned long SAMPLE_INTERVAL_MS = 1000;  // one reading per second
 const unsigned long CONVERSION_MS      = 750;   // DS18B20 12-bit conversion time
 const unsigned long BUTTON_SCAN_MS     = 5;     // poll the keypad every few ms
@@ -194,7 +200,17 @@ void setup() {
   loadSettings();                       // restore the saved Setpoint/Tolerance (or defaults)
 
   lcd.begin(16, 2);
-  // First updateDisplay() paints the full Home screen (sentinels force it).
+
+  // Boot splash: name the box for ~1.5 s, then land straight on Home. This
+  // delay() is a one-time boot step, not the running path -- the control loop
+  // hasn't started, the heater is already OFF, and nothing is being sampled or
+  // edited yet, so it does not touch the keypad responsiveness ADR-0002 protects
+  // in loop().
+  lcd.setCursor(2, 0);
+  lcd.print("dough-ray-me");
+  delay(BOOT_SPLASH_MS);
+  updateDisplay();   // paint Home now (temp reads "--.-" until the first sample)
+                     // so the splash hands straight to Home with no blank gap
 }
 
 // Force a full repaint of the value fields -- used when the active screen or the
@@ -361,7 +377,12 @@ void handleReading(float tempC) {
   Serial.print(ui.toleranceC, 2);
   Serial.print("  Heat:");
   Serial.print(heating ? "ON" : "OFF");
-  Serial.print("  Alarm:");
+  // Heater Duty (percent ON since power-on), from the same accumulator the Stats
+  // screen shows -- statsAccrue() in loop() has already folded in the interval up
+  // to now, so this is the current duty.
+  Serial.print("  Duty:");
+  Serial.print(statsDutyPercent(stats));
+  Serial.print("%  Alarm:");
   Serial.println(safe.alarm == ALARM_NONE ? "none" : alarmLabel(safe.alarm));
 
   updateDisplay();
