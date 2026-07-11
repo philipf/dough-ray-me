@@ -77,18 +77,21 @@ const unsigned long BOOT_SPLASH_MS     = 1500;  // "dough-ray-me" splash on powe
 const unsigned long SAMPLE_INTERVAL_MS = 1000;  // one reading per second
 const unsigned long CONVERSION_MS      = 750;   // DS18B20 12-bit conversion time
 const unsigned long BUTTON_SCAN_MS     = 5;     // poll the keypad every few ms
-const unsigned long REPEAT_DELAY_MS    = 500;   // hold this long before auto-repeat starts
-const unsigned long REPEAT_RATE_MS     = 150;   // then emit a repeat this often
+const uint8_t       BUTTON_CONFIRM_SCANS = 3;   // reading must hold this many scans before it counts (~15 ms debounce)
 
 // --- Keypad analog ladder ---------------------------------------------------
 // DFRobot LCD Keypad Shield thresholds. Each button ties A0 to a different
-// voltage via a resistor divider; we bucket the raw 0-1023 reading. "None"
-// (all buttons up) floats near 1023.
-const int KEY_ADC_RIGHT  = 50;
-const int KEY_ADC_UP     = 195;
-const int KEY_ADC_DOWN   = 380;
-const int KEY_ADC_LEFT   = 555;
-const int KEY_ADC_SELECT = 790;
+// voltage via a resistor divider; we bucket the raw 0-1023 reading, "None"
+// (all buttons up) floats near 1023. A reading below a threshold is that button.
+// Values are set to the midpoints between THIS unit's measured centres, with
+// margin for contact bounce -- Down in particular bounces up toward ~385, so its
+// upper edge sits well clear of Left (measured ~529):
+//   Right ~12   Up ~143   Down ~329   Left ~529   Select ~750   None ~1023
+const int KEY_ADC_RIGHT  = 80;
+const int KEY_ADC_UP     = 235;
+const int KEY_ADC_DOWN   = 455;
+const int KEY_ADC_LEFT   = 640;
+const int KEY_ADC_SELECT = 890;
 
 // --- Hardware ---------------------------------------------------------------
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
@@ -112,10 +115,15 @@ PersistState persist;                 // debounced-EEPROM-write state, seeded in
 StatsState stats = statsInitial();
 unsigned long lastAccrueMs = 0;       // for accruing Heater Duty from elapsed time
 
-// Keypad edge detection + auto-repeat (impure timing lives here, not in ui.h).
-UiButton      heldButton   = UI_BTN_NONE;  // button currently pressed, or NONE
-unsigned long lastScanMs   = 0;            // last time we sampled A0
-unsigned long nextRepeatMs = 0;            // when the held button next auto-repeats
+// Keypad edge detection with a debounce (click-only; the impure A0 sampling
+// lives here, not in ui.h). The analog ladder emits a short burst of readings as
+// a button makes/breaks contact -- some in a neighbouring button's band -- so a
+// reading is only accepted once it has held for BUTTON_CONFIRM_SCANS scans, and
+// each confirmed press fires exactly one event.
+UiButton      heldButton      = UI_BTN_NONE;  // last confirmed button, or NONE
+UiButton      candidateButton = UI_BTN_NONE;  // reading awaiting confirmation
+uint8_t       candidateScans  = 0;            // consecutive scans it has held for
+unsigned long lastScanMs      = 0;            // last time we sampled A0
 
 // LCD repaint tracking (repaint only on change, to avoid flicker).
 UiScreen shownScreen        = UI_SCREEN_COUNT;  // sentinel: force first paint
@@ -388,35 +396,37 @@ void handleReading(float tempC) {
   updateDisplay();
 }
 
-// Non-blocking keypad scan: edge-detect the analog ladder and auto-repeat on
-// hold. Emits at most one pure UiButton event per call; the pure state machine
-// (ui.h) does the rest. Auto-repeat timing is impure and stays here (ADR-0002:
-// no delay(), millis()-scheduled).
+// Non-blocking keypad scan: debounce the analog ladder, then edge-detect so each
+// press fires exactly one event (click-only -- no auto-repeat). The pure state
+// machine (ui.h) does the rest. Stays non-blocking (ADR-0002: no delay(),
+// millis()-scheduled).
 void scanButtons(unsigned long now) {
   if ((now - lastScanMs) < BUTTON_SCAN_MS) return;
   lastScanMs = now;
 
   UiButton btn = readKeypad();
-  UiButton event = UI_BTN_NONE;
 
-  if (btn != heldButton) {
-    // Edge: a new button went down (or all released). A press fires one step
-    // immediately, then arms the initial pre-repeat pause.
-    heldButton = btn;
-    if (btn != UI_BTN_NONE) {
-      event = btn;
-      nextRepeatMs = now + REPEAT_DELAY_MS;
-    }
-  } else if (btn != UI_BTN_NONE && (long)(now - nextRepeatMs) >= 0) {
-    // Still held past the pause: auto-repeat at the steady rate.
-    event = btn;
-    nextRepeatMs = now + REPEAT_RATE_MS;
+  // Debounce: a reading must repeat across BUTTON_CONFIRM_SCANS scans before we
+  // trust it. A fresh value restarts the count, so a lone contact-bounce sample
+  // (which can land in the wrong band mid-press) never survives to fire.
+  if (btn != candidateButton) {
+    candidateButton = btn;
+    candidateScans  = 1;
+    return;
+  }
+  if (candidateScans < BUTTON_CONFIRM_SCANS) {
+    candidateScans++;
+    return;                        // not held long enough yet
   }
 
-  if (event != UI_BTN_NONE) {
-    ui = uiStep(ui, event);   // live edit: new Setpoint/Tolerance used next reading
-    updateDisplay();          // reflect navigation / value change at once
-  }
+  // Confirmed stable. Edge-detect against the last confirmed button so a held key
+  // fires once, not repeatedly.
+  if (btn == heldButton) return;   // no edge: still held, or still released
+  heldButton = btn;
+  if (btn == UI_BTN_NONE) return;  // a release, not a new press
+
+  ui = uiStep(ui, btn);   // live edit: new Setpoint/Tolerance used next reading
+  updateDisplay();        // reflect navigation / value change at once
 }
 
 void loop() {

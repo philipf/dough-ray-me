@@ -34,9 +34,8 @@ enum UiScreen {
   UI_SCREEN_COUNT   // sentinel = number of screens, used for wrap arithmetic
 };
 
-// Button events fed in by the keypad decode. Auto-repeat is done upstream by
-// millis() timing, so a held Up/Down simply arrives as repeated UI_BTN_UP /
-// UI_BTN_DOWN events -- this pure unit treats each one as a single step.
+// Button events fed in by the keypad decode. One event per physical press
+// (click-only -- no auto-repeat), so each Up/Down is a single step.
 enum UiButton {
   UI_BTN_NONE = 0,
   UI_BTN_UP,
