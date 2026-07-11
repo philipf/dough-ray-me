@@ -1,14 +1,17 @@
-// dough-ray-me -- fermentation temperature controller (ticket 1: control spine).
+// dough-ray-me -- fermentation temperature controller (tickets 1-2: control
+// spine + safety gate).
 //
 // Holds the Fermenting Box at a fixed, compile-time Setpoint using a hysteresis
 // control law, on a non-blocking loop (ADR-0002): the DS18B20 is read
 // asynchronously and there is no delay() in loop(), so the keypad added in a
-// later ticket will never feel laggy. The decision logic lives in control.h as a
-// pure, host-tested unit; this file is the thin hardware shell around it.
+// later ticket will never feel laggy. The decision logic lives in two pure,
+// host-tested units -- control.h (the control law) and safety.h (the fail-safe
+// gate applied on top of it) -- and this file is the thin hardware shell around
+// them.
 //
-// Later tickets add: the safety gate + Alarm (#2), keypad editing of Setpoint and
-// Tolerance (#3), EEPROM persistence (#4), the Stats screen (#5), and the boot
-// splash + full serial line (#6).
+// Later tickets add: keypad editing of Setpoint and Tolerance (#3), EEPROM
+// persistence (#4), the Stats screen (#5), and the boot splash + full serial
+// line (#6).
 //
 // Pin map (from the thermostat PoC, unchanged):
 //   D2        DS18B20 data (4.7k pull-up to 5V)
@@ -24,10 +27,18 @@
 #include <DallasTemperature.h>
 
 #include "control.h"
+#include "safety.h"
 
 // --- Fixed tuning (becomes keypad-editable in ticket 3) ---------------------
 const float SETPOINT_C  = 24.0;   // target Box Air Temperature
 const float TOLERANCE_C = 0.5;    // +/- half-band around the Setpoint
+
+// A reading outside this plausible band (or DEVICE_DISCONNECTED_C, which is
+// -127 and so falls below the floor) is treated as a Sensor Fault: the Box Air
+// Temperature is unknown, so the safety gate forces the heater OFF. The window
+// is generous but sits below the DS18B20's 85 C power-on glitch value.
+const float SENSOR_MIN_C = -20.0;
+const float SENSOR_MAX_C = 60.0;
 
 // --- Pins -------------------------------------------------------------------
 const uint8_t RELAY_PIN     = 3;
@@ -45,12 +56,14 @@ DallasTemperature sensors(&oneWire);
 
 // --- Runtime state ----------------------------------------------------------
 bool heating = false;                 // current heater state, held across loops
+bool overTempLatched = false;         // Safety Cutoff latch, threaded to safety.h
 bool conversionPending = false;       // waiting on an async DS18B20 conversion
 unsigned long lastRequestMs = 0;      // when the current sample was requested
 
 // LCD repaint tracking (repaint only on change, to avoid flicker).
 int  shownTempDeci = INT16_MIN;       // last shown temp * 10, or sentinel
 int  shownHeating  = -1;              // last shown heater state, or sentinel
+int  shownAlarm    = -1;              // last shown SafetyAlarm, or sentinel
 
 void relayApply(bool on) {
   digitalWrite(RELAY_PIN, on == RELAY_ACTIVE_HIGH ? HIGH : LOW);
@@ -75,8 +88,27 @@ void setup() {
   lcd.print("C");
 }
 
-// Repaint only the parts of the LCD that changed.
-void updateDisplay(float tempC) {
+// Repaint only the parts of the LCD that changed. On an Alarm the whole screen
+// is replaced with a distinct Alarm display so a force-OFF box is never mistaken
+// for the normal Home screen (ADR-0001).
+void updateDisplay(float tempC, SafetyAlarm alarm) {
+  if ((int)alarm != shownAlarm) {
+    // Alarm state changed: repaint the whole screen. Reset the per-field
+    // trackers so the next normal paint (on clearing the Alarm) isn't skipped.
+    shownAlarm = (int)alarm;
+    shownTempDeci = INT16_MIN;
+    shownHeating  = -1;
+    lcd.clear();
+    if (alarm != ALARM_NONE) {
+      lcd.setCursor(0, 0);
+      lcd.print("** ALARM **");
+      lcd.setCursor(0, 1);
+      lcd.print(alarm == ALARM_SENSOR_FAULT ? "Sensor fault" : "Over-temp >35C");
+    }
+  }
+  if (alarm != ALARM_NONE) return;   // Alarm screen is static; nothing to repaint
+
+  // Normal Home: temperature on the top row, heat state + Setpoint below.
   int tempDeci = (int)(tempC * 10.0 + (tempC >= 0 ? 0.5 : -0.5));
   if (tempDeci != shownTempDeci) {
     shownTempDeci = tempDeci;
@@ -96,27 +128,34 @@ void updateDisplay(float tempC) {
   }
 }
 
-// Fold a fresh reading into the control decision and outputs.
+// Fold a fresh reading through the control decision and the safety gate, then
+// drive the outputs. The safety gate (safety.h) sits on top of the control law
+// and can only ever force the heater further OFF -- never ON (ADR-0001).
 void handleReading(float tempC) {
-  if (tempC == DEVICE_DISCONNECTED_C) {
-    // Bare safe glue: never heat on a bad reading. The fault Alarm / UI and the
-    // 35 C Safety Cutoff (ADR-0001) are ticket #2's job, not this one.
-    heating = false;
-    relayApply(false);
-    return;
-  }
+  bool sensorOk = (tempC >= SENSOR_MIN_C) && (tempC <= SENSOR_MAX_C);
 
-  heating = decideHeat(tempC, SETPOINT_C, TOLERANCE_C, heating);
+  // What the control law wants -- only meaningful on a trustworthy reading; the
+  // gate ignores it anyway when the sensor has faulted.
+  bool controlHeat = sensorOk ? decideHeat(tempC, SETPOINT_C, TOLERANCE_C, heating)
+                              : false;
+
+  SafetyDecision safe = safetyGate(tempC, sensorOk, controlHeat, overTempLatched);
+  heating = safe.heatOn;
+  overTempLatched = safe.overTempLatched;
   relayApply(heating);
 
   Serial.print("T:");
-  Serial.print(tempC, 1);
+  if (sensorOk) Serial.print(tempC, 1);
+  else          Serial.print("--.-");
   Serial.print(" C  Set:");
   Serial.print(SETPOINT_C, 1);
   Serial.print("  Heat:");
-  Serial.println(heating ? "ON" : "OFF");
+  Serial.print(heating ? "ON" : "OFF");
+  Serial.print("  Alarm:");
+  Serial.println(safe.alarm == ALARM_NONE ? "none"
+               : safe.alarm == ALARM_SENSOR_FAULT ? "SENSOR" : "OVER-TEMP");
 
-  updateDisplay(tempC);
+  updateDisplay(tempC, safe.alarm);
 }
 
 void loop() {
