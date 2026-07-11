@@ -1,20 +1,22 @@
-// dough-ray-me -- fermentation temperature controller (tickets 1-6: control
-// spine + safety gate + keypad UI + EEPROM persistence + Stats screen numbers +
-// boot splash and the full once-per-sample serial line).
+// dough-ray-me -- fermentation temperature controller (tickets 1-6 + the Graph
+// screen: control spine + safety gate + keypad UI + EEPROM persistence + Stats
+// screen numbers + 80-minute Graph history + boot splash and the full
+// once-per-sample serial line).
 //
 // Holds the Fermenting Box at a baker-chosen Setpoint using a hysteresis control
 // law, on a non-blocking loop (ADR-0002): the DS18B20 is read asynchronously and
-// there is no delay() in loop(), so the keypad never feels laggy. Five pure,
+// there is no delay() in loop(), so the keypad never feels laggy. Six pure,
 // host-tested units carry the logic -- decideHeat() in control.h (the control
 // law), safetyGate() in safety.h (the fail-safe gate applied on top of it), the
 // UI state machine in ui.h, the persistence unit in persist.h (the debounced
-// EEPROM write timer + boot validity check), and the Stats accumulators in
-// stats.h; this file is the thin hardware shell around them.
+// EEPROM write timer + boot validity check), the Stats accumulators in stats.h,
+// and the Graph screen's history model in history.h; this file is the thin
+// hardware shell around them.
 //
-// The LCD Keypad Shield adds live editing: Left/Right page four screens
-// (Home / Setpoint / Tolerance / Stats), Up/Down edit the current screen's value
-// (and the Setpoint straight from Home), and Select returns to Home. Edits are
-// live with no confirm -- the new Setpoint/Tolerance feed decideHeat() at once.
+// The LCD Keypad Shield adds live editing: Left/Right page five screens
+// (Home / Setpoint / Tolerance / Stats / Graph), Up/Down edit the current screen's
+// value (and the Setpoint straight from Home), and Select returns to Home. Edits
+// are live with no confirm -- the new Setpoint/Tolerance feed decideHeat() at once.
 // On a Sensor Fault or the 35 C Safety Cutoff the gate forces the heater OFF and
 // a distinct Alarm screen overrides the UI (ADR-0001).
 //
@@ -50,6 +52,7 @@
 #include "ui.h"
 #include "persist.h"
 #include "stats.h"
+#include "history.h"
 
 // A reading outside this plausible band (or DEVICE_DISCONNECTED_C, which is
 // -127 and so falls below the floor) is treated as a Sensor Fault: the Box Air
@@ -115,6 +118,32 @@ PersistState persist;                 // debounced-EEPROM-write state, seeded in
 StatsState stats = statsInitial();
 unsigned long lastAccrueMs = 0;       // for accruing Heater Duty from elapsed time
 
+// The Graph screen's 80-minute history (history.h): 16 windows of 5 minutes, fed
+// the same elapsed-time + relay state as the Stats Heater Duty, plus each valid
+// Box Air Temperature reading. RAM-only, so the shield's RESET clears it back to
+// historyInitial() while the Setpoint/Tolerance persist -- the Stats lifecycle.
+HistoryState history = historyInitial();
+
+// --- Graph CGRAM glyphs -----------------------------------------------------
+// The bottom-row deviation bar is a centered (diverging) bar drawn in one 5x8
+// cell per column: the midline sits between rows 3 and 4, hot windows grow the
+// bar up (+1..+4, rows 3..0) and cold windows grow it down (-1..-4, rows 4..7).
+// That is 8 non-zero levels -- exactly the 8 CGRAM slots the HD44780 offers -- so
+// the on-Setpoint level 0 is drawn with the built-in '-' instead, and EMPTY
+// columns are left blank. Slot layout: 0..3 = +1..+4, 4..7 = -1..-4.
+const uint8_t GRAPH_CGRAM_COUNT   = 8;
+const uint8_t GRAPH_NEG_SLOT_BASE = 4;   // CGRAM slots 4..7 hold the -1..-4 bars
+byte graphGlyphs[GRAPH_CGRAM_COUNT][8] = {
+  {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00, 0x00},  // slot 0: +1
+  {0x00, 0x00, 0x1F, 0x1F, 0x00, 0x00, 0x00, 0x00},  // slot 1: +2
+  {0x00, 0x1F, 0x1F, 0x1F, 0x00, 0x00, 0x00, 0x00},  // slot 2: +3
+  {0x1F, 0x1F, 0x1F, 0x1F, 0x00, 0x00, 0x00, 0x00},  // slot 3: +4
+  {0x00, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00},  // slot 4: -1
+  {0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x00, 0x00},  // slot 5: -2
+  {0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x00},  // slot 6: -3
+  {0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x1F},  // slot 7: -4
+};
+
 // Keypad edge detection with a debounce (click-only; the impure A0 sampling
 // lives here, not in ui.h). The analog ladder emits a short burst of readings as
 // a button makes/breaks contact -- some in a neighbouring button's band -- so a
@@ -135,6 +164,8 @@ int      shownAlarm         = -1;               // last shown SafetyAlarm, or se
 int      shownMinDeci       = INT16_MIN;        // last shown min Box Air Temp * 10
 int      shownMaxDeci       = INT16_MIN;        // last shown max Box Air Temp * 10
 int      shownDutyPct       = -1;               // last shown Heater Duty percent
+HistoryRender shownGraph;                        // last-drawn Graph render model
+bool     shownGraphValid    = false;            // false forces a full Graph repaint
 
 // Round a temperature to fixed-point deci/centi for cheap change detection.
 int toDeci(float v)  { return (int)(v * 10.0  + (v >= 0 ? 0.5 : -0.5)); }
@@ -209,6 +240,10 @@ void setup() {
 
   lcd.begin(16, 2);
 
+  // Load the 8 deviation-bar glyphs into CGRAM once; the Graph screen writes them
+  // by slot number. Level 0 uses the built-in '-', so all 8 slots are bars.
+  for (uint8_t i = 0; i < GRAPH_CGRAM_COUNT; ++i) lcd.createChar(i, graphGlyphs[i]);
+
   // Boot splash: name the box for ~1.5 s, then land straight on Home. This
   // delay() is a one-time boot step, not the running path -- the control loop
   // hasn't started, the heater is already OFF, and nothing is being sampled or
@@ -231,6 +266,41 @@ void invalidateDisplay() {
   shownMinDeci       = INT16_MIN;
   shownMaxDeci       = INT16_MIN;
   shownDutyPct       = -1;
+  shownGraphValid    = false;   // the whole 16x2 Graph grid repaints from scratch
+}
+
+// Translate one column's render codes (history.h) into the byte to write. The bar
+// maps EMPTY -> blank, level 0 -> built-in '-', +1..+4 -> CGRAM slots 0..3 and
+// -1..-4 -> slots 4..7; the duty maps EMPTY -> blank, else the ASCII digit.
+uint8_t graphBarByte(int barLevel) {
+  if (barLevel == HISTORY_EMPTY) return ' ';
+  if (barLevel == 0)             return '-';
+  if (barLevel > 0)              return (uint8_t)(barLevel - 1);            // slots 0..3
+  return (uint8_t)(GRAPH_NEG_SLOT_BASE + (-barLevel - 1));                 // slots 4..7
+}
+uint8_t graphDutyByte(int dutyDigit) {
+  if (dutyDigit == HISTORY_EMPTY) return ' ';
+  return (uint8_t)('0' + dutyDigit);
+}
+
+// Paint the full 16x2 Graph grid from the history render model: top row the
+// per-window Heater Duty digit, bottom row the Setpoint-centered deviation bar,
+// newest window on the right. Only cells that changed are rewritten (Rule 7), so
+// the live right edge moves each second without flickering the frozen columns.
+void paintGraph() {
+  HistoryRender r = historyRender(history, ui.setpointC);
+  for (int c = 0; c < HISTORY_COLUMNS; ++c) {
+    if (!shownGraphValid || r.cols[c].dutyDigit != shownGraph.cols[c].dutyDigit) {
+      lcd.setCursor(c, 0);
+      lcd.write(graphDutyByte(r.cols[c].dutyDigit));
+    }
+    if (!shownGraphValid || r.cols[c].barLevel != shownGraph.cols[c].barLevel) {
+      lcd.setCursor(c, 1);
+      lcd.write(graphBarByte(r.cols[c].barLevel));
+    }
+  }
+  shownGraph = r;
+  shownGraphValid = true;
 }
 
 // Repaint only the parts of the LCD that changed. An active Alarm overrides every
@@ -350,6 +420,11 @@ void updateDisplay() {
       break;
     }
 
+    case UI_GRAPH:
+      // Headerless: both rows are the graph, no title and no numeric temperature.
+      paintGraph();
+      break;
+
     default: break;
   }
 }
@@ -363,6 +438,7 @@ void handleReading(float tempC) {
   if (sensorOk) {
     lastTempC = tempC;               // hold the last known-good temp for the Home screen
     stats = statsObserveTemp(stats, tempC);   // fold into the min/max Stats swing
+    history = historyObserveTemp(history, tempC);  // fold into the current Graph window's mean
   }
 
   // What the control law wants -- only meaningful on a trustworthy reading; the
@@ -436,9 +512,12 @@ void loop() {
   // relay state (heating) -- so a Safety Cutoff or Sensor Fault that forces the
   // heater OFF is counted as OFF. Done every loop (ADR-0002: elapsed time, never
   // a blocking counter); heating only changes in handleReading below, so the
-  // interval just gone carried whatever state we accrue here.
-  stats = statsAccrue(stats, heating, now - lastAccrueMs);
+  // interval just gone carried whatever state we accrue here. The same interval
+  // feeds the Graph history, which also drives its 5-minute window rollover.
+  unsigned long accrueDelta = now - lastAccrueMs;
   lastAccrueMs = now;
+  stats = statsAccrue(stats, heating, accrueDelta);
+  history = historyAccrue(history, heating, accrueDelta);
 
   // Kick off a new conversion once per interval.
   if (!conversionPending && (now - lastRequestMs) >= SAMPLE_INTERVAL_MS) {

@@ -35,9 +35,11 @@ int main() {
   s = uiStep(s, UI_BTN_RIGHT);  CHECK(s.screen == UI_SETPOINT);
   s = uiStep(s, UI_BTN_RIGHT);  CHECK(s.screen == UI_TOLERANCE);
   s = uiStep(s, UI_BTN_RIGHT);  CHECK(s.screen == UI_STATS);
+  s = uiStep(s, UI_BTN_RIGHT);  CHECK(s.screen == UI_GRAPH);  // Graph sits after Stats
   s = uiStep(s, UI_BTN_RIGHT);  CHECK(s.screen == UI_HOME);   // wraps forward
 
-  s = uiStep(s, UI_BTN_LEFT);   CHECK(s.screen == UI_STATS);  // wraps backward
+  s = uiStep(s, UI_BTN_LEFT);   CHECK(s.screen == UI_GRAPH);  // wraps backward
+  s = uiStep(s, UI_BTN_LEFT);   CHECK(s.screen == UI_STATS);
   s = uiStep(s, UI_BTN_LEFT);   CHECK(s.screen == UI_TOLERANCE);
   s = uiStep(s, UI_BTN_LEFT);   CHECK(s.screen == UI_SETPOINT);
   s = uiStep(s, UI_BTN_LEFT);   CHECK(s.screen == UI_HOME);
@@ -104,10 +106,22 @@ int main() {
 
   // --- Stats is a read-only shell: Up/Down change nothing --------------------
   s = uiInitial();
-  s = uiStep(s, UI_BTN_LEFT);   CHECK(s.screen == UI_STATS);  // wrap straight to Stats
+  s = uiStep(s, UI_BTN_RIGHT); s = uiStep(s, UI_BTN_RIGHT); s = uiStep(s, UI_BTN_RIGHT);
+  CHECK(s.screen == UI_STATS);
   s = uiStep(s, UI_BTN_UP);     CHECK(near(s.setpointC, 24.0f));
   s = uiStep(s, UI_BTN_DOWN);   CHECK(near(s.toleranceC, 0.5f));
   CHECK(s.screen == UI_STATS);
+
+  // --- Graph is a read-only shell too: Up/Down are inert, Select escapes ------
+  // The baker's most common action (nudging the Setpoint) must not fire while
+  // they're just looking at history, and Select still returns Home from here.
+  s = uiInitial();
+  s = uiStep(s, UI_BTN_LEFT);    CHECK(s.screen == UI_GRAPH);  // wrap straight to Graph
+  s = uiStep(s, UI_BTN_UP);      CHECK(near(s.setpointC, 24.0f));
+  s = uiStep(s, UI_BTN_DOWN);    CHECK(near(s.setpointC, 24.0f));
+  CHECK(near(s.toleranceC, 0.5f));
+  CHECK(s.screen == UI_GRAPH);                                 // Up/Down don't leave Graph
+  s = uiStep(s, UI_BTN_SELECT);  CHECK(s.screen == UI_HOME);   // Select returns Home
 
   // --- A none-event is a no-op -----------------------------------------------
   s = uiInitial();

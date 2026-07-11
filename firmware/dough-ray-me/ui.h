@@ -24,13 +24,16 @@ const float UI_TOLERANCE_MAX  = 2.0f;
 const float UI_TOLERANCE_STEP = 0.25f;
 const float UI_TOLERANCE_BOOT = 0.5f;
 
-// The four screens, paged with Left/Right and wrapping:
-//   Home -> Setpoint -> Tolerance -> Stats -> (wraps back to Home)
+// The five screens, paged with Left/Right and wrapping:
+//   Home -> Setpoint -> Tolerance -> Stats -> Graph -> (wraps back to Home)
+// The two read-only dashboards (Stats, Graph) sit together after the edit screens,
+// so the edit screens stay next to Home.
 enum UiScreen {
   UI_HOME = 0,      // read-only: Box Air Temperature, Setpoint, heat state, Tolerance
   UI_SETPOINT,      // Up/Down edit the Setpoint
   UI_TOLERANCE,     // Up/Down edit the Tolerance
   UI_STATS,         // read-only: min/max Box Air Temperature + Heater Duty
+  UI_GRAPH,         // read-only: 80-minute Heater Duty + Box Air Temperature history
   UI_SCREEN_COUNT   // sentinel = number of screens, used for wrap arithmetic
 };
 
@@ -87,7 +90,7 @@ inline UiState uiStep(UiState s, UiButton ev) {
         s.setpointC = uiClamp(s.setpointC + UI_SETPOINT_STEP,
                               UI_SETPOINT_MIN, UI_SETPOINT_MAX);
       }
-      break;                              // Stats has no editable value
+      break;                              // Stats and Graph have no editable value
     case UI_BTN_DOWN:
       if (s.screen == UI_TOLERANCE) {
         s.toleranceC = uiClamp(s.toleranceC - UI_TOLERANCE_STEP,
