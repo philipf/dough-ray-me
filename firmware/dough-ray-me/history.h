@@ -27,7 +27,7 @@
 //     model the .ino can draw without any arithmetic of its own: a Setpoint-
 //     centered bar level and a Heater-Duty digit, newest column on the right.
 
-// The three state-threading functions below carry a HistoryState by value (228
+// The three state-threading functions below carry a HistoryState by value (244
 // bytes at 16 columns). In the Arduino sketch the whole program collapses into a
 // single inlined main(), and gcc gives each inlined by-value temporary its own
 // stack slot rather than reusing one -- so left to inline, the accrue/observe/
@@ -53,6 +53,12 @@ static const int           HISTORY_EMPTY     = -128;       // render sentinel: n
                                                            // distinct from any bar
                                                            // level (-4..+4) or duty
                                                            // digit (0..9)
+static const int           HISTORY_CUTOFF    = -127;       // duty-slot sentinel: the
+                                                           // 35 C Safety Cutoff fired in
+                                                           // this window -- the .ino draws
+                                                           // '!' instead of a duty digit.
+                                                           // Distinct from HISTORY_EMPTY
+                                                           // and every 0..9 digit.
 
 // One accumulated window. tempCount == 0 means no valid reading was folded (a
 // never-touched window, or one the probe was faulted through), so its bar renders
@@ -62,6 +68,9 @@ struct HistoryWindow {
   uint16_t      tempCount;   // number of valid readings folded (0 => bar EMPTY)
   unsigned long heaterOnMs;  // ms the heater relay was ON within this window
   unsigned long windowMs;    // ms accrued into this window (rolls at HISTORY_WINDOW_MS)
+  bool          cutoffFired; // the 35 C Safety Cutoff fired at some point this window;
+                             // latches once set and survives the box re-arming, so the
+                             // timeline keeps a visible scar of the over-temp excursion
 };
 
 // The full history as a ring of windows. `head` is the current (newest, in-
@@ -75,7 +84,8 @@ struct HistoryState {
 
 // Per-column render model: two small integers so the .ino does no arithmetic.
 // barLevel is -HISTORY_BAR_MAX..+HISTORY_BAR_MAX or HISTORY_EMPTY; dutyDigit is
-// 0..9 or HISTORY_EMPTY (EMPTY only for a never-started column).
+// 0..9, HISTORY_EMPTY (only for a never-started column), or HISTORY_CUTOFF (the
+// Safety Cutoff fired in this window -- drawn as '!', ahead of any duty digit).
 struct HistoryColumnRender {
   int barLevel;
   int dutyDigit;
@@ -89,10 +99,11 @@ struct HistoryRender {
 
 inline HistoryWindow historyWindowInitial() {
   HistoryWindow w;
-  w.tempSum    = 0.0f;
-  w.tempCount  = 0;
-  w.heaterOnMs = 0;
-  w.windowMs   = 0;
+  w.tempSum     = 0.0f;
+  w.tempCount   = 0;
+  w.heaterOnMs  = 0;
+  w.windowMs    = 0;
+  w.cutoffFired = false;
   return w;
 }
 
@@ -130,7 +141,16 @@ HISTORY_NOINLINE inline HistoryState historyObserveTemp(HistoryState s, float te
 // that would cross a boundary is split so elapsed time accumulates across the
 // rollover rather than being lost or double-counted; the loop is robust to a
 // single interval spanning several windows.
-HISTORY_NOINLINE inline HistoryState historyAccrue(HistoryState s, bool heatOn, unsigned long deltaMs) {
+//
+// safetyCutoff is the over-temp verdict for this interval -- true while the 35 C
+// Safety Cutoff is forcing the heater OFF (a Sensor Fault is NOT a cutoff and
+// passes false). When true it latches the cutoffFired scar on every window the
+// interval touches; the scar persists once set (never cleared here), so a
+// window keeps its mark after the box cools and the latch re-arms. Defaults to
+// false so the existing duty/rollover call sites are unaffected.
+HISTORY_NOINLINE inline HistoryState historyAccrue(HistoryState s, bool heatOn,
+                                                   unsigned long deltaMs,
+                                                   bool safetyCutoff = false) {
   while (deltaMs > 0) {
     // Invariant at the top of the loop: the current window is not yet full, so
     // there is at least 1 ms of room and the loop makes progress.
@@ -138,6 +158,7 @@ HISTORY_NOINLINE inline HistoryState historyAccrue(HistoryState s, bool heatOn, 
     unsigned long take = deltaMs < room ? deltaMs : room;
     s.cols[s.head].windowMs += take;
     if (heatOn) s.cols[s.head].heaterOnMs += take;
+    if (safetyCutoff) s.cols[s.head].cutoffFired = true;   // latch the over-temp scar
     deltaMs -= take;
     if (s.cols[s.head].windowMs >= HISTORY_WINDOW_MS) s = historyRollover(s);
   }
@@ -180,7 +201,11 @@ HISTORY_NOINLINE inline HistoryRender historyRender(const HistoryState& s, float
     int display = HISTORY_COLUMNS - 1 - k;                 // newest at the right
     int ring    = (s.head - k + HISTORY_COLUMNS) % HISTORY_COLUMNS;
     r.cols[display].barLevel  = historyBarLevel(s.cols[ring], setpointC);
-    r.cols[display].dutyDigit = historyDutyDigit(s.cols[ring]);
+    // A window in which the Safety Cutoff fired flags CUTOFF in its duty slot,
+    // ahead of the tenths digit: the scar reads over any duty the window logged.
+    r.cols[display].dutyDigit = s.cols[ring].cutoffFired
+                                  ? HISTORY_CUTOFF
+                                  : historyDutyDigit(s.cols[ring]);
   }
   return r;
 }

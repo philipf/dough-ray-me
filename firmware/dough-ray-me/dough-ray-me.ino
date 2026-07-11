@@ -279,7 +279,8 @@ uint8_t graphBarByte(int barLevel) {
   return (uint8_t)(GRAPH_NEG_SLOT_BASE + (-barLevel - 1));                 // slots 4..7
 }
 uint8_t graphDutyByte(int dutyDigit) {
-  if (dutyDigit == HISTORY_EMPTY) return ' ';
+  if (dutyDigit == HISTORY_EMPTY)  return ' ';
+  if (dutyDigit == HISTORY_CUTOFF) return '!';   // the 35 C Safety Cutoff fired here
   return (uint8_t)('0' + dutyDigit);
 }
 
@@ -517,7 +518,15 @@ void loop() {
   unsigned long accrueDelta = now - lastAccrueMs;
   lastAccrueMs = now;
   stats = statsAccrue(stats, heating, accrueDelta);
-  history = historyAccrue(history, heating, accrueDelta);
+  // The Graph history also latches a Safety Cutoff scar. The signal is the
+  // over-temp latch, not the display Alarm: safety.h holds overTempLatched even
+  // while a Sensor Fault masks the Alarm (we can't confirm the box cooled to the
+  // re-arm point through a faulted probe), so the latch -- not currentAlarm -- is
+  // what keeps the heater forced OFF across such an interval. It holds the value
+  // from the last reading, which governed the interval just gone (as `heating`
+  // does for the relay). A pure Sensor Fault leaves it false, so only the 35 C
+  // over-temp excursion scars a window (issue #13).
+  history = historyAccrue(history, heating, accrueDelta, overTempLatched);
 
   // Kick off a new conversion once per interval.
   if (!conversionPending && (now - lastRequestMs) >= SAMPLE_INTERVAL_MS) {

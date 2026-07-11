@@ -177,6 +177,49 @@ int main() {
     CHECK(HISTORY_EMPTY != -HISTORY_BAR_MAX);  // EMPTY is not the genuine cold level
   }
 
+  // --- Safety Cutoff scar: a fired 35 C cutoff latches a ! over the duty digit --
+  // The full-screen Alarm only shows while the cutoff is active (ADR-0001); once
+  // the box re-arms it clears and nothing else records the excursion. The Graph
+  // keeps a permanent scar: any window in which the Safety Cutoff fired renders a
+  // CUTOFF sentinel in its duty slot, ahead of (and replacing) the tenths digit.
+  {
+    // A cutoff firing within a window latches the scar, and it takes precedence
+    // over the real Heater Duty digit and survives the box recovering / re-arming.
+    HistoryState s = historyInitial();
+    s = historyAccrue(s, false, W / 4, true);   // over-temp: heater forced OFF, cutoff firing
+    CHECK(newest(historyRender(s, 24.0f)).dutyDigit == HISTORY_CUTOFF);
+    s = historyAccrue(s, true, W / 4, false);   // re-armed: heater back ON, no cutoff
+    // Real duty has accrued, but the scar still wins -- CUTOFF over the digit.
+    CHECK(newest(historyRender(s, 24.0f)).dutyDigit == HISTORY_CUTOFF);
+    // The scar is a distinct sentinel, never confused with EMPTY or a duty digit.
+    CHECK(HISTORY_CUTOFF != HISTORY_EMPTY);
+  }
+  {
+    // A Sensor Fault also forces the heater OFF, but it is NOT a Safety Cutoff --
+    // no scar. The window renders its real Heater Duty (0 here), never CUTOFF.
+    HistoryState s = historyInitial();
+    s = historyAccrue(s, false, W, false);      // whole window OFF, but no over-temp
+    CHECK(historyRender(s, 24.0f).cols[HISTORY_COLUMNS - 2].dutyDigit == 0);
+  }
+  {
+    // The scar latches on its window and survives the 5-minute rollover: once
+    // frozen it keeps reading CUTOFF as a past column, a permanent timeline scar,
+    // while the fresh live window opens clean.
+    HistoryState s = historyInitial();
+    s = historyAccrue(s, true, W, true);        // a full window with the cutoff firing -> rolls over
+    HistoryRender r = historyRender(s, 24.0f);
+    CHECK(r.cols[HISTORY_COLUMNS - 2].dutyDigit == HISTORY_CUTOFF);  // frozen window keeps the scar
+    CHECK(newest(r).dutyDigit != HISTORY_CUTOFF);                    // fresh live window is clean
+  }
+  {
+    // A cutoff interval spanning a window boundary scars both windows it touched.
+    HistoryState s = historyInitial();
+    s = historyAccrue(s, false, W + W / 2, true);   // 1.5 windows, cutoff throughout
+    HistoryRender r = historyRender(s, 24.0f);
+    CHECK(r.cols[HISTORY_COLUMNS - 2].dutyDigit == HISTORY_CUTOFF);  // frozen window scarred
+    CHECK(newest(r).dutyDigit == HISTORY_CUTOFF);                    // live window scarred too
+  }
+
   // --- Ring order: newest on the right, oldest drops off after 16 windows ------
   // Give each window a distinct mean by folding one reading per window, then
   // rolling over. Setpoint is chosen so the level equals a clean index marker.
