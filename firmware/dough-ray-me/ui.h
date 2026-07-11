@@ -30,7 +30,7 @@ enum UiScreen {
   UI_HOME = 0,      // read-only: Box Air Temperature, Setpoint, heat state, Tolerance
   UI_SETPOINT,      // Up/Down edit the Setpoint
   UI_TOLERANCE,     // Up/Down edit the Tolerance
-  UI_STATS,         // read-only shell here; its numbers arrive in ticket 5
+  UI_STATS,         // read-only: min/max Box Air Temperature + Heater Duty
   UI_SCREEN_COUNT   // sentinel = number of screens, used for wrap arithmetic
 };
 

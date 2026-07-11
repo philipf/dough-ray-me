@@ -1,14 +1,14 @@
-// dough-ray-me -- fermentation temperature controller (tickets 1-4: control
-// spine + safety gate + keypad UI + EEPROM persistence).
+// dough-ray-me -- fermentation temperature controller (tickets 1-5: control
+// spine + safety gate + keypad UI + EEPROM persistence + Stats screen numbers).
 //
 // Holds the Fermenting Box at a baker-chosen Setpoint using a hysteresis control
 // law, on a non-blocking loop (ADR-0002): the DS18B20 is read asynchronously and
-// there is no delay() in loop(), so the keypad never feels laggy. Four pure,
+// there is no delay() in loop(), so the keypad never feels laggy. Five pure,
 // host-tested units carry the logic -- decideHeat() in control.h (the control
 // law), safetyGate() in safety.h (the fail-safe gate applied on top of it), the
-// UI state machine in ui.h, and the persistence unit in persist.h (the debounced
-// EEPROM write timer + boot validity check); this file is the thin hardware
-// shell around them.
+// UI state machine in ui.h, the persistence unit in persist.h (the debounced
+// EEPROM write timer + boot validity check), and the Stats accumulators in
+// stats.h; this file is the thin hardware shell around them.
 //
 // The LCD Keypad Shield adds live editing: Left/Right page four screens
 // (Home / Setpoint / Tolerance / Stats), Up/Down edit the current screen's value
@@ -20,10 +20,11 @@
 // The chosen Setpoint and Tolerance survive a power cut: they are read from
 // EEPROM on boot (falling back to the 24 C / +/-0.5 C defaults on a fresh chip)
 // and written back ~2 s after they stop changing, so holding to ramp costs one
-// write, not one per step (persist.h).
+// write, not one per step (persist.h). The Stats screen shows the min/max Box
+// Air Temperature and Heater Duty since power-on, cleared by the shield's RESET
+// (stats.h).
 //
-// Later tickets add: the Stats screen numbers (#5) and the boot splash + full
-// serial line (#6).
+// Later tickets add: the boot splash + full serial line (#6).
 //
 // Pin map (from the thermostat PoC, unchanged):
 //   D2        DS18B20 data (4.7k pull-up to 5V)
@@ -43,6 +44,7 @@
 #include "safety.h"
 #include "ui.h"
 #include "persist.h"
+#include "stats.h"
 
 // A reading outside this plausible band (or DEVICE_DISCONNECTED_C, which is
 // -127 and so falls below the floor) is treated as a Sensor Fault: the Box Air
@@ -98,6 +100,12 @@ float lastTempC = DEVICE_DISCONNECTED_C;  // most recent valid reading, for repa
 UiState ui = uiInitial();             // live screen + Setpoint + Tolerance (pure unit)
 PersistState persist;                 // debounced-EEPROM-write state, seeded in setup()
 
+// Since-power-on Stats shown on the Stats screen (min/max Box Air Temperature +
+// Heater Duty). The shield's physical RESET reboots the Uno, so this re-inits to
+// statsInitial() for a fresh observation while the Setpoint/Tolerance persist.
+StatsState stats = statsInitial();
+unsigned long lastAccrueMs = 0;       // for accruing Heater Duty from elapsed time
+
 // Keypad edge detection + auto-repeat (impure timing lives here, not in ui.h).
 UiButton      heldButton   = UI_BTN_NONE;  // button currently pressed, or NONE
 unsigned long lastScanMs   = 0;            // last time we sampled A0
@@ -110,6 +118,9 @@ int      shownHeating       = -1;               // last shown heater state
 int      shownSetpointDeci  = INT16_MIN;        // last shown Setpoint * 10
 int      shownToleranceCenti = INT16_MIN;        // last shown Tolerance * 100
 int      shownAlarm         = -1;               // last shown SafetyAlarm, or sentinel
+int      shownMinDeci       = INT16_MIN;        // last shown min Box Air Temp * 10
+int      shownMaxDeci       = INT16_MIN;        // last shown max Box Air Temp * 10
+int      shownDutyPct       = -1;               // last shown Heater Duty percent
 
 // Round a temperature to fixed-point deci/centi for cheap change detection.
 int toDeci(float v)  { return (int)(v * 10.0  + (v >= 0 ? 0.5 : -0.5)); }
@@ -193,6 +204,9 @@ void invalidateDisplay() {
   shownHeating       = -1;
   shownSetpointDeci  = INT16_MIN;
   shownToleranceCenti = INT16_MIN;
+  shownMinDeci       = INT16_MIN;
+  shownMaxDeci       = INT16_MIN;
+  shownDutyPct       = -1;
 }
 
 // Repaint only the parts of the LCD that changed. An active Alarm overrides every
@@ -284,14 +298,33 @@ void updateDisplay() {
       }
       break;
 
-    case UI_STATS:
-      // Shell only: the min/max and Heater Duty numbers arrive in ticket 5.
-      if (shownTempDeci == INT16_MIN) {
-        shownTempDeci = 0;
+    case UI_STATS: {
+      // Since-power-on Stats: row 0 the min/max Box Air Temperature swing, row 1
+      // the Heater Duty. Both read "--.-" / 0% until the first valid reading.
+      int minDeci = toDeci(stats.minTempC);
+      int maxDeci = toDeci(stats.maxTempC);
+      int dutyPct = statsDutyPercent(stats);
+      if (minDeci != shownMinDeci || maxDeci != shownMaxDeci) {
+        shownMinDeci = minDeci;
+        shownMaxDeci = maxDeci;
+        lcd.setCursor(0, 0);
+        lcd.print("Lo:");
+        if (stats.seenTemp) lcd.print(stats.minTempC, 1);
+        else                lcd.print("--.-");
+        lcd.print(" Hi:");
+        if (stats.seenTemp) lcd.print(stats.maxTempC, 1);
+        else                lcd.print("--.-");
+        lcd.print(" ");          // pad to wipe any stale trailing char
+      }
+      if (dutyPct != shownDutyPct) {
+        shownDutyPct = dutyPct;
         lcd.setCursor(0, 1);
-        lcd.print("(ticket 5)      ");
+        lcd.print("Heater Duty ");
+        lcd.print(dutyPct);
+        lcd.print("%   ");       // pad to wipe a shrinking number (100 -> 42 -> 5)
       }
       break;
+    }
 
     default: break;
   }
@@ -303,7 +336,10 @@ void updateDisplay() {
 // force the heater further OFF -- never ON (ADR-0001).
 void handleReading(float tempC) {
   bool sensorOk = (tempC >= SENSOR_MIN_C) && (tempC <= SENSOR_MAX_C);
-  if (sensorOk) lastTempC = tempC;   // hold the last known-good temp for the Home screen
+  if (sensorOk) {
+    lastTempC = tempC;               // hold the last known-good temp for the Home screen
+    stats = statsObserveTemp(stats, tempC);   // fold into the min/max Stats swing
+  }
 
   // What the control law wants -- only meaningful on a trustworthy reading; the
   // gate ignores it anyway when the sensor has faulted.
@@ -364,6 +400,14 @@ void scanButtons(unsigned long now) {
 
 void loop() {
   unsigned long now = millis();
+
+  // Accrue Heater Duty from the interval since the last pass, against the actual
+  // relay state (heating) -- so a Safety Cutoff or Sensor Fault that forces the
+  // heater OFF is counted as OFF. Done every loop (ADR-0002: elapsed time, never
+  // a blocking counter); heating only changes in handleReading below, so the
+  // interval just gone carried whatever state we accrue here.
+  stats = statsAccrue(stats, heating, now - lastAccrueMs);
+  lastAccrueMs = now;
 
   // Kick off a new conversion once per interval.
   if (!conversionPending && (now - lastRequestMs) >= SAMPLE_INTERVAL_MS) {

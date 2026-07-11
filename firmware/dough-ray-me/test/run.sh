@@ -10,3 +10,5 @@ g++ -std=c++17 -Wall -Wextra -o /tmp/drm_test_ui test_ui.cpp
 /tmp/drm_test_ui
 g++ -std=c++17 -Wall -Wextra -o /tmp/drm_test_persist test_persist.cpp
 /tmp/drm_test_persist
+g++ -std=c++17 -Wall -Wextra -o /tmp/drm_test_stats test_stats.cpp
+/tmp/drm_test_stats
