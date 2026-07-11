@@ -1,12 +1,14 @@
-// dough-ray-me -- fermentation temperature controller (tickets 1-3: control
-// spine + safety gate + keypad UI).
+// dough-ray-me -- fermentation temperature controller (tickets 1-4: control
+// spine + safety gate + keypad UI + EEPROM persistence).
 //
 // Holds the Fermenting Box at a baker-chosen Setpoint using a hysteresis control
 // law, on a non-blocking loop (ADR-0002): the DS18B20 is read asynchronously and
-// there is no delay() in loop(), so the keypad never feels laggy. Three pure,
+// there is no delay() in loop(), so the keypad never feels laggy. Four pure,
 // host-tested units carry the logic -- decideHeat() in control.h (the control
-// law), safetyGate() in safety.h (the fail-safe gate applied on top of it), and
-// the UI state machine in ui.h; this file is the thin hardware shell around them.
+// law), safetyGate() in safety.h (the fail-safe gate applied on top of it), the
+// UI state machine in ui.h, and the persistence unit in persist.h (the debounced
+// EEPROM write timer + boot validity check); this file is the thin hardware
+// shell around them.
 //
 // The LCD Keypad Shield adds live editing: Left/Right page four screens
 // (Home / Setpoint / Tolerance / Stats), Up/Down edit the current screen's value
@@ -15,8 +17,13 @@
 // On a Sensor Fault or the 35 C Safety Cutoff the gate forces the heater OFF and
 // a distinct Alarm screen overrides the UI (ADR-0001).
 //
-// Later tickets add: EEPROM persistence (#4), the Stats screen numbers (#5), and
-// the boot splash + full serial line (#6).
+// The chosen Setpoint and Tolerance survive a power cut: they are read from
+// EEPROM on boot (falling back to the 24 C / +/-0.5 C defaults on a fresh chip)
+// and written back ~2 s after they stop changing, so holding to ramp costs one
+// write, not one per step (persist.h).
+//
+// Later tickets add: the Stats screen numbers (#5) and the boot splash + full
+// serial line (#6).
 //
 // Pin map (from the thermostat PoC, unchanged):
 //   D2        DS18B20 data (4.7k pull-up to 5V)
@@ -27,6 +34,7 @@
 //   D13       LED_BUILTIN -- mirrors the relay
 //   A0        keypad analog ladder (5 buttons on one pin)
 
+#include <EEPROM.h>
 #include <LiquidCrystal.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -34,6 +42,7 @@
 #include "control.h"
 #include "safety.h"
 #include "ui.h"
+#include "persist.h"
 
 // A reading outside this plausible band (or DEVICE_DISCONNECTED_C, which is
 // -127 and so falls below the floor) is treated as a Sensor Fault: the Box Air
@@ -47,6 +56,14 @@ const uint8_t RELAY_PIN     = 3;
 const bool    RELAY_ACTIVE_HIGH = true;
 const int     ONE_WIRE_BUS  = 2;
 const uint8_t KEYPAD_PIN    = A0;      // all 5 buttons on one analog resistor ladder
+
+// --- EEPROM layout ----------------------------------------------------------
+// A magic byte, then the two floats. The magic lets persistDecode() tell a
+// first-ever flash (0xFF bytes) from saved settings; the values are stored raw
+// (EEPROM.put) and validated against their ranges on read-back (persist.h).
+const int EEPROM_ADDR_MAGIC     = 0;
+const int EEPROM_ADDR_SETPOINT  = 1;   // float, 4 bytes
+const int EEPROM_ADDR_TOLERANCE = 5;   // float, 4 bytes
 
 // --- Timing -----------------------------------------------------------------
 const unsigned long SAMPLE_INTERVAL_MS = 1000;  // one reading per second
@@ -79,6 +96,7 @@ unsigned long lastRequestMs = 0;      // when the current sample was requested
 float lastTempC = DEVICE_DISCONNECTED_C;  // most recent valid reading, for repaints on UI change
 
 UiState ui = uiInitial();             // live screen + Setpoint + Tolerance (pure unit)
+PersistState persist;                 // debounced-EEPROM-write state, seeded in setup()
 
 // Keypad edge detection + auto-repeat (impure timing lives here, not in ui.h).
 UiButton      heldButton   = UI_BTN_NONE;  // button currently pressed, or NONE
@@ -124,6 +142,34 @@ UiButton readKeypad() {
   return UI_BTN_NONE;
 }
 
+// Read the saved Setpoint/Tolerance back from EEPROM and apply them to the live
+// UI state, so the control law runs at the baker's chosen values from the first
+// reading. persistDecode() (persist.h) supplies the 24 C / +/-0.5 C defaults
+// when the EEPROM is uninitialised (a fresh chip) or holds out-of-range garbage.
+void loadSettings() {
+  uint8_t magic;
+  float   storedSetpointC;
+  float   storedToleranceC;
+  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
+  EEPROM.get(EEPROM_ADDR_SETPOINT, storedSetpointC);
+  EEPROM.get(EEPROM_ADDR_TOLERANCE, storedToleranceC);
+
+  PersistValues v = persistDecode(magic, storedSetpointC, storedToleranceC);
+  ui.setpointC  = v.setpointC;
+  ui.toleranceC = v.toleranceC;
+  // Seed the debounce state to what EEPROM now holds, so no write fires until the
+  // baker actually changes a value.
+  persist = persistInitial(v.setpointC, v.toleranceC);
+}
+
+// Commit the debounced Setpoint/Tolerance to EEPROM. EEPROM.put writes only the
+// bytes that changed, sparing cells that already hold the right value.
+void saveSettings() {
+  EEPROM.put(EEPROM_ADDR_MAGIC, PERSIST_MAGIC);
+  EEPROM.put(EEPROM_ADDR_SETPOINT, persist.committedSetpointC);
+  EEPROM.put(EEPROM_ADDR_TOLERANCE, persist.committedToleranceC);
+}
+
 void setup() {
   Serial.begin(9600);
   sensors.begin();
@@ -133,6 +179,8 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   heating = false;
   relayApply(false);                    // heater OFF until the first valid reading
+
+  loadSettings();                       // restore the saved Setpoint/Tolerance (or defaults)
 
   lcd.begin(16, 2);
   // First updateDisplay() paints the full Home screen (sentinels force it).
@@ -332,4 +380,11 @@ void loop() {
 
   // Scan the keypad every few ms so presses are never swallowed by the sensor.
   scanButtons(now);
+
+  // Persist the live Setpoint/Tolerance ~2 s after they stop changing. The pure
+  // debounce timer (persist.h) decides *when*; a held ramp keeps restarting it,
+  // so a whole adjustment costs one EEPROM write, not one per step.
+  PersistUpdate pu = persistStep(persist, ui.setpointC, ui.toleranceC, now);
+  persist = pu.state;
+  if (pu.write) saveSettings();
 }
