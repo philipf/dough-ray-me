@@ -44,6 +44,34 @@ USB cable when you want to study how the box behaves.
 - Solid-state relay switching a light bulb as the heat source
 - An insulated polystyrene box
 
+## Getting started
+
+You'll need [`arduino-cli`](https://arduino.github.io/arduino-cli/) with the
+`arduino:avr` core and the three libraries below installed, plus a C++ compiler
+(`g++`) for the host tests. Adjust the serial port (`/dev/ttyACM0`) to match your board.
+
+Clone, compile, and upload to a connected Uno, then watch the serial log:
+
+```sh
+git clone https://github.com/philipf/dough-ray-me.git
+cd dough-ray-me/firmware/dough-ray-me
+
+arduino-cli compile . \
+  && arduino-cli upload . \
+  && tio -b 9600 -m INLCRNL -t /dev/ttyACM0
+```
+
+Run the host tests (pure logic — no board or Arduino toolchain needed):
+
+```sh
+cd firmware/dough-ray-me/test
+./run.sh
+```
+
+`run.sh` compiles and runs each unit test with `g++` (C++17). The control law,
+safety gate, UI state machine, persistence timer and stats accumulators are all
+tested here on your laptop; the hardware glue is verified by flashing the board.
+
 ## The full spec
 
 This README is the quick tour. The complete problem statement, user stories, control
