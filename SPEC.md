@@ -86,7 +86,10 @@ It is a closed system: no networking, no cooling hardware, unplug-and-done.
 - **Control law.** Hysteresis on the raw reading: heat ON below `Setpoint − Tolerance`, OFF
   above `Setpoint + Tolerance`, hold between. Tolerance is a ± half-band, so total swing is
   `2 × Tolerance`.
-- **Setpoint.** Boots 24 °C; editable 18–30 °C in 0.5 °C steps.
+- **Setpoint.** Boots 24 °C; editable 18–30 °C in 0.5 °C steps. This is the *target*
+  range, not a temperature ceiling: the box air can drift above the Setpoint (overshoot,
+  ambient) with no Alarm until it reaches the hard 35 °C Safety Cutoff below — that 35 °C is
+  the only over-temperature limit the firmware enforces.
 - **Tolerance.** Default ±0.5 °C; editable ±0.25 to ±2.0 °C in 0.25 °C steps.
 - **Persistence.** Setpoint and Tolerance persist to EEPROM, written only after a value has
   stopped changing for ~2 s (debounced) so holding to ramp causes one write per adjustment,
