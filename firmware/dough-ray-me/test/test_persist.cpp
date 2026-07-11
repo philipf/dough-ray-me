@@ -78,6 +78,27 @@ int main() {
     CHECK(near(v.setpointC, 24.0f) && near(v.toleranceC, 0.5f));
   }
 
+  // --- Right magic, in range, but OFF the editable grid -> defaults ----------
+  // uiStep() can only ever produce on-grid values, so an in-range off-grid
+  // read-back (stale bytes from a prior firmware with different steps, or a
+  // corrupt float that happens to land in range) is untrustworthy and never
+  // self-corrects -- uiStep only adds/subtracts a step, so 24.3 -> 24.8 -> ...
+  // Reject the whole block to the documented defaults rather than drive the
+  // control law off-grid.
+  {
+    CHECK(near(persistDecode(PERSIST_MAGIC, 24.3f, 1.0f).setpointC,  24.0f));  // Setpoint off 0.5 grid
+    CHECK(near(persistDecode(PERSIST_MAGIC, 24.0f, 0.6f).toleranceC, 0.5f));   // Tolerance off 0.25 grid
+    // A rejected block falls back on *both* fields together.
+    PersistValues v = persistDecode(PERSIST_MAGIC, 24.3f, 1.0f);
+    CHECK(near(v.setpointC, 24.0f) && near(v.toleranceC, 0.5f));
+  }
+  // On-grid interior values (not just the range edges above) stay trusted, so
+  // the grid check doesn't over-reject legitimately saved settings.
+  {
+    PersistValues v = persistDecode(PERSIST_MAGIC, 19.5f, 0.75f);
+    CHECK(near(v.setpointC, 19.5f) && near(v.toleranceC, 0.75f));
+  }
+
   // ==== persistStep: debounced writes (~2 s) =================================
 
   // --- Steady state: no change, no write -------------------------------------

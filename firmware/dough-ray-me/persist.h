@@ -113,15 +113,32 @@ struct PersistValues {
   float toleranceC;
 };
 
+// True when v sits on the editable grid (min + n*step) within a tolerance far
+// tighter than a step but far looser than float round-off. uiStep() only ever
+// produces on-grid values, so an in-range but *off*-grid read-back means the
+// bytes are stale (a prior firmware with different steps) or corrupt -- not a
+// value this firmware could have written. A NaN v makes every term NaN and so
+// fails the comparison, joining the range check in rejecting garbage.
+inline bool persistOnGrid(float v, float min, float step) {
+  float steps   = (v - min) / step;               // v >= min already checked
+  long  n       = (long)(steps + 0.5f);           // nearest grid index
+  float snapped = min + (float)n * step;
+  float diff    = snapped - v;
+  if (diff < 0) diff = -diff;
+  return diff <= 0.01f;                            // << 0.25 step, >> float error
+}
+
 // Trust the EEPROM values only when the magic marker matches and both sit inside
-// their documented editable ranges; otherwise fall back to the safe defaults. A
-// NaN read (garbage float) fails every comparison, so it too resolves to the
-// defaults rather than driving the control law with nonsense.
+// their documented editable ranges *and on their grids*; otherwise fall back to
+// the safe defaults. A NaN read (garbage float) fails every comparison, so it too
+// resolves to the defaults rather than driving the control law with nonsense.
 inline PersistValues persistDecode(uint8_t magic, float setpointC,
                                    float toleranceC) {
   bool valid = (magic == PERSIST_MAGIC) &&
                (setpointC  >= UI_SETPOINT_MIN)  && (setpointC  <= UI_SETPOINT_MAX) &&
-               (toleranceC >= UI_TOLERANCE_MIN) && (toleranceC <= UI_TOLERANCE_MAX);
+               (toleranceC >= UI_TOLERANCE_MIN) && (toleranceC <= UI_TOLERANCE_MAX) &&
+               persistOnGrid(setpointC,  UI_SETPOINT_MIN,  UI_SETPOINT_STEP) &&
+               persistOnGrid(toleranceC, UI_TOLERANCE_MIN, UI_TOLERANCE_STEP);
   PersistValues v;
   v.setpointC  = valid ? setpointC  : UI_SETPOINT_BOOT;
   v.toleranceC = valid ? toleranceC : UI_TOLERANCE_BOOT;
