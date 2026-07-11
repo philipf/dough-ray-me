@@ -90,7 +90,7 @@ UiScreen shownScreen        = UI_SCREEN_COUNT;  // sentinel: force first paint
 int      shownTempDeci      = INT16_MIN;        // last shown temp * 10
 int      shownHeating       = -1;               // last shown heater state
 int      shownSetpointDeci  = INT16_MIN;        // last shown Setpoint * 10
-int      shownToleranceDeci = INT16_MIN;        // last shown Tolerance * 100
+int      shownToleranceCenti = INT16_MIN;        // last shown Tolerance * 100
 int      shownAlarm         = -1;               // last shown SafetyAlarm, or sentinel
 
 // Round a temperature to fixed-point deci/centi for cheap change detection.
@@ -100,6 +100,17 @@ int toCenti(float v) { return (int)(v * 100.0 + (v >= 0 ? 0.5 : -0.5)); }
 void relayApply(bool on) {
   digitalWrite(RELAY_PIN, on == RELAY_ACTIVE_HIGH ? HIGH : LOW);
   digitalWrite(LED_BUILTIN, on ? HIGH : LOW);
+}
+
+// The single source of truth for Alarm wording, shared by the LCD Alarm screen
+// and the serial line so the two can't drift apart. ALARM_NONE has no label --
+// the LCD shows no Alarm and the serial line prints "none" itself.
+const char* alarmLabel(SafetyAlarm a) {
+  switch (a) {
+    case ALARM_SENSOR_FAULT: return "Sensor fault";
+    case ALARM_OVER_TEMP:    return "Over-temp >35C";
+    default:                 return "";
+  }
 }
 
 // Decode the raw A0 reading into a button, or NONE when all are up.
@@ -133,7 +144,7 @@ void invalidateDisplay() {
   shownTempDeci      = INT16_MIN;
   shownHeating       = -1;
   shownSetpointDeci  = INT16_MIN;
-  shownToleranceDeci = INT16_MIN;
+  shownToleranceCenti = INT16_MIN;
 }
 
 // Repaint only the parts of the LCD that changed. An active Alarm overrides every
@@ -152,7 +163,7 @@ void updateDisplay() {
       lcd.setCursor(0, 0);
       lcd.print("** ALARM **");
       lcd.setCursor(0, 1);
-      lcd.print(currentAlarm == ALARM_SENSOR_FAULT ? "Sensor fault" : "Over-temp >35C");
+      lcd.print(alarmLabel(currentAlarm));
     }
   }
   if (currentAlarm != ALARM_NONE) return;   // Alarm screen is static; nothing more to paint
@@ -179,23 +190,27 @@ void updateDisplay() {
 
   switch (ui.screen) {
     case UI_HOME:
-      // Row 0: current Box Air Temperature.  Row 1: heat state + Setpoint.
-      if (tempDeci != shownTempDeci) {
+      // Home shows all four read-only fields the spec asks for, across two rows:
+      // Row 0: Box Air Temperature + heat state.  Row 1: Setpoint + Tolerance.
+      if (tempDeci != shownTempDeci || (int)heating != shownHeating) {
         shownTempDeci = tempDeci;
+        shownHeating  = (int)heating;
         lcd.setCursor(0, 0);
-        lcd.print("Temp:");
-        if (haveTemp) { lcd.print(lastTempC, 1); lcd.print("C   "); }
-        else          { lcd.print("--.-C  "); }
+        lcd.print("T:");
+        if (haveTemp) lcd.print(lastTempC, 1);
+        else          lcd.print("--.-");
+        lcd.print("C Heat:");
+        lcd.print(heating ? "ON " : "OFF");   // both 3 chars -> row stays 16 wide
       }
-      if ((int)heating != shownHeating || setDeci != shownSetpointDeci) {
-        shownHeating      = (int)heating;
-        shownSetpointDeci = setDeci;
+      if (setDeci != shownSetpointDeci || tolCenti != shownToleranceCenti) {
+        shownSetpointDeci   = setDeci;
+        shownToleranceCenti = tolCenti;
         lcd.setCursor(0, 1);
-        lcd.print("Heat:");
-        lcd.print(heating ? "ON " : "OFF");
-        lcd.print(" S:");             // abbreviated so the row fits 16 columns
+        lcd.print("S:");
         lcd.print(ui.setpointC, 1);
-        lcd.print(" ");               // pad to wipe any stale trailing char
+        lcd.print(" +/-");
+        lcd.print(ui.toleranceC, 2);
+        lcd.print("  ");             // pad to wipe any stale trailing char
       }
       break;
 
@@ -212,8 +227,8 @@ void updateDisplay() {
 
     case UI_TOLERANCE:
       // Row 1: the live Tolerance (+/- half-band) the baker is editing.
-      if (tolCenti != shownToleranceDeci) {
-        shownToleranceDeci = tolCenti;
+      if (tolCenti != shownToleranceCenti) {
+        shownToleranceCenti = tolCenti;
         lcd.setCursor(0, 1);
         lcd.print("+/-");
         lcd.print(ui.toleranceC, 2);
@@ -263,8 +278,7 @@ void handleReading(float tempC) {
   Serial.print("  Heat:");
   Serial.print(heating ? "ON" : "OFF");
   Serial.print("  Alarm:");
-  Serial.println(safe.alarm == ALARM_NONE ? "none"
-               : safe.alarm == ALARM_SENSOR_FAULT ? "SENSOR" : "OVER-TEMP");
+  Serial.println(safe.alarm == ALARM_NONE ? "none" : alarmLabel(safe.alarm));
 
   updateDisplay();
 }
