@@ -54,7 +54,14 @@ so a cold or cut-out box is never silent or mistaken for normal operation.
 _Avoid_: warning, error, fault (as UI label)
 
 **Heater Duty**:
-The fraction of time the bulb has been ON since power-on — a coarse read on how hard
-the box is working to hold the Setpoint. Shown on the read-only Stats screen alongside
-the min/max Box Air Temperature, to help the baker characterise the box over a bake.
+The fraction of time the bulb has been ON — a coarse read on how hard the box is
+working to hold the Setpoint. Shown two ways: on the Stats screen as a single
+since-power-on figure alongside the min/max Box Air Temperature, and on the Graph
+screen sliced per time window, to help the baker characterise the box over a bake.
 _Avoid_: duty cycle, load, on-time
+
+**Graph screen**:
+The read-only screen showing the last ~80 minutes of the Fermenting Box's behaviour
+as a compact history: per-window Heater Duty above, and Box Air Temperature deviation
+from the Setpoint below. Since-power-on and cleared by RESET, like the Stats screen.
+_Avoid_: chart, trend, plot, log, history screen
